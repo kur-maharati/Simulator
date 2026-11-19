@@ -1,147 +1,1166 @@
-/* Electrical Basic Simulator V3 - SMK Maharati, Teknik Alat Berat */
-const NS='http://www.w3.org/2000/svg',W=1400,H=850,GRID=10;
-const catalog=[
- ['battery','Baterai','B','12 V'],['fuse','Fuse','F','10 A'],['switch','Switch SPST','SW','OFF'],['relay','Relay','K','12 V coil'],['lamp','Rotary lamp','L','12 V / 5 W'],['diode','Dioda','D','1N4007'],['resistor','Resistor','R','1 kΩ'],['ldr','LDR','R','10 kΩ'],['avometer','Avometer','M','DMM'],['fan','Fan / Motor DC','M','12 V'],['pot','Potensiometer','RV','10 kΩ'],['ne555','IC NE555','U','Timer'],['button','Push button','S','NO']
+
+/* =====================================================
+   ELECTRICAL BASIC SIMULATOR
+   TEKNIK ALAT BERAT - SMK MAHARATI
+   Version 1.0
+===================================================== */
+
+const $ = id => document.getElementById(id);
+
+const svgNS = 'http://www.w3.org/2000/svg';
+
+const svg = $('circuitCanvas');
+const componentLayer = $('componentLayer');
+const wireLayer = $('wireLayer');
+const terminalLayer = $('terminalLayer');
+
+const W = 1600;
+const H = 1000;
+const GRID = 20;
+
+let parts = [];
+let wires = [];
+let selected = null;
+let pendingTerminal = null;
+let nextId = 1;
+let running = false;
+let zoom = 1;
+let meterMode = 'V';
+
+/* =====================================================
+   1. COMPONENT LIBRARY
+===================================================== */
+
+const catalog = [
+  {
+    type:'battery', name:'Baterai', ref:'B',
+    symbol:'battery', terminals:[[-50,0],[50,0]],
+    defaults:{voltage:12}
+  },
+  {
+    type:'fuse', name:'Fuse', ref:'F',
+    terminals:[[-40,0],[40,0]],
+    defaults:{rating:10,blown:false}
+  },
+  {
+    type:'switch', name:'Switch', ref:'SW',
+    terminals:[[-40,0],[40,0]],
+    defaults:{closed:false}
+  },
+  {
+    type:'relay', name:'Relay', ref:'K',
+    terminals:[[-55,-25],[-55,25],[55,0]],
+    defaults:{voltage:12,closed:false}
+  },
+  {
+    type:'rotary', name:'Rotary Lamp', ref:'RL',
+    terminals:[[-45,0],[45,0]],
+    defaults:{voltage:12,resistance:24}
+  },
+  {
+    type:'lamp', name:'Lamp', ref:'L',
+    terminals:[[-45,0],[45,0]],
+    defaults:{voltage:12,resistance:24}
+  },
+  {
+    type:'led', name:'LED', ref:'D',
+    terminals:[[-45,0],[45,0]],
+    defaults:{color:'red',voltage:2,resistance:470}
+  },
+  {
+    type:'diode', name:'Dioda', ref:'D',
+    terminals:[[-45,0],[45,0]],
+    defaults:{forwardVoltage:0.7}
+  },
+  {
+    type:'resistor', name:'Resistor', ref:'R',
+    terminals:[[-45,0],[45,0]],
+    defaults:{resistance:1000}
+  },
+  {
+    type:'ldr', name:'LDR', ref:'LDR',
+    terminals:[[-45,0],[45,0]],
+    defaults:{resistance:10000,light:50}
+  },
+  {
+    type:'avometer', name:'Avometer', ref:'M',
+    terminals:[[-45,0],[45,0]],
+    defaults:{mode:'V'}
+  },
+  {
+    type:'fan', name:'Fan', ref:'FAN',
+    terminals:[[-45,0],[45,0]],
+    defaults:{voltage:12,resistance:30}
+  },
+  {
+    type:'pot', name:'Potensiometer', ref:'VR',
+    terminals:[[-50,0],[50,0],[0,-45]],
+    defaults:{resistance:10000,position:50}
+  },
+  {
+    type:'ne555', name:'IC NE555', ref:'IC',
+    terminals:[
+      [-55,-35],[-55,-12],[-55,12],[-55,35],
+      [55,-35],[55,-12],[55,12],[55,35]
+    ],
+    defaults:{voltage:5,frequency:1,duty:50}
+  },
+  {
+    type:'button', name:'Button', ref:'PB',
+    terminals:[[-40,0],[40,0]],
+    defaults:{pressed:false}
+  }
 ];
-const defaults={battery:{voltage:12},fuse:{rating:10,blown:false},switch:{closed:false},relay:{closed:false,coilVoltage:12},lamp:{ratedVoltage:12,watts:5},diode:{enabled:true},resistor:{ohms:1000},ldr:{light:50},avometer:{},fan:{ratedVoltage:12,watts:2},pot:{ohms:10000,position:50},ne555:{frequency:2,duty:50,enabled:true},button:{pressed:false}};
-let parts=[],wires=[],selected=null,wireStart=null,mode='wire',meterActive=false,powered=false,zoom=1,meterMode='V',probeRed=null,probeBlack=null,lastSolution=null,undoStack=[],redoStack=[],nextId=1,toastTimer;
-const $=id=>document.getElementById(id),svg=$('schematic'),wireLayer=$('wireLayer'),flowLayer=$('flowLayer'),componentLayer=$('componentLayer'),overlayLayer=$('overlayLayer');
-function el(tag,attrs={},parent){let n=document.createElementNS(NS,tag);Object.entries(attrs).forEach(([k,v])=>n.setAttribute(k,v));if(parent)parent.appendChild(n);return n}
-function ln(g,x1,y1,x2,y2,cl='symbol-stroke'){return el('line',{x1,y1,x2,y2,class:cl},g)}
-function pth(g,d,cl='symbol-stroke'){return el('path',{d,class:cl},g)}
-function circ(g,x,y,r,cl='symbol-stroke'){return el('circle',{cx:x,cy:y,r,class:cl},g)}
-function rect(g,x,y,w,h,cl='symbol-fill',rx=0){return el('rect',{x,y,width:w,height:h,rx,class:cl},g)}
-function txt(g,x,y,s,cl='symbol-text',anchor='middle'){let n=el('text',{x,y,class:cl,'text-anchor':anchor},g);n.textContent=s;return n}
-function clone(o){return JSON.parse(JSON.stringify(o))}
-function snap(v){return Math.round(v/GRID)*GRID}
-function toast(s){let t=$('toast');t.textContent=s;t.classList.add('show');clearTimeout(toastTimer);toastTimer=setTimeout(()=>t.classList.remove('show'),2300)}
-function snapshot(){undoStack.push(JSON.stringify({parts,wires,nextId}));if(undoStack.length>50)undoStack.shift();redoStack=[]}
-function restore(raw){let d=JSON.parse(raw);parts=d.parts;wires=d.wires;nextId=d.nextId;selected=null;powered=false;solveAndRender(false)}
-function addPart(type){snapshot();let d=catalog.find(x=>x[0]===type),count=parts.length,p={id:nextId++,type,ref:d[2]+(parts.filter(x=>x.type===type).length+1),name:d[1],x:snap(300+(count%4)*210),y:snap(190+Math.floor(count/4)*155),rotation:0,...clone(defaults[type])};parts.push(p);selected=p.id;render();updateInspector();$('componentCount').textContent=parts.length;toast(p.name+' ditambahkan')}
-function pinOffsets(p){if(p.type==='ne555')return [[-30,-30],[-30,-10],[-30,10],[-30,30],[30,30],[30,10],[30,-10],[30,-30]];return [[-40,0],[40,0]]}
-function pinPos(p,i){let [dx,dy]=pinOffsets(p)[i];let a=(p.rotation||0)*Math.PI/180;return{x:p.x+dx*Math.cos(a)-dy*Math.sin(a),y:p.y+dx*Math.sin(a)+dy*Math.cos(a)}}
-function pinName(p,i){if(p.type==='ne555')return ['GND','TRIG','OUT','RESET','CTRL','THR','DISCH','VCC'][i];return i===0?'+ / A':'− / K'}
-function drawSymbol(g,p){let x=p.x,y=p.y;let a=(x1,y1,x2,y2)=>ln(g,x+x1,y+y1,x+x2,y+y2),c=(xx,yy,r,cl)=>circ(g,x+xx,y+yy,r,cl),t=(xx,yy,s,cl,anc)=>txt(g,x+xx,y+yy,s,cl,anc);
- switch(p.type){
- case'battery':a(-40,0,-12,0);a(12,0,40,0);a(-12,-20,12,-20);a(-12,20,12,20);a(-6,-29,6,-29);a(-6,29,6,29);t(0,-35,'+');t(0,43,'−');break;
- case'fuse':a(-40,0,-20,0);a(20,0,40,0);rect(g,x-20,y-10,40,20,'symbol-fill',2);if(p.blown){pth(g,`M${x-15} ${y+13} l30 -26`,'symbol-stroke')}break;
- case'switch':a(-40,0,-13,0);a(13,0,40,0);c(-13,0,3);c(13,0,3);ln(g,x-13,y,x+(p.closed?13:8),y+(p.closed?0:-17));break;
- case'relay':a(-40,0,-25,0);a(25,0,40,0);rect(g,x-25,y-19,50,38,'symbol-fill',3);pth(g,`M${x-16} ${y+9} q16 -30 32 0`);t(0,4,'K');break;
- case'lamp':a(-40,0,-24,0);a(24,0,40,0);c(0,0,24,'symbol-fill');c(0,0,31,'lamp-glow');pth(g,`M${x-12} ${y+13} Q${x-22} ${y-14} ${x} ${y-12} Q${x+22} ${y-8} ${x+12} ${y+13} Q${x} ${y+22} ${x-12} ${y+13}`);break;
- case'diode':a(-40,0,-14,0);a(14,0,40,0);pth(g,`M${x-14} ${y-15} L${x+14} ${y} L${x-14} ${y+15} Z`,'symbol-fill');a(14,-17,14,17);break;
- case'resistor':a(-40,0,-24,0);a(24,0,40,0);pth(g,`M${x-24} ${y} l6 -11 l8 22 l8 -22 l8 22 l8 -11`);break;
- case'ldr':a(-40,0,-24,0);a(24,0,40,0);c(0,0,24);pth(g,`M${x-12} ${y+12} L${x+12} ${y-12} M${x-18} ${y-24} l-9 -9 m9 9 l-1 -10 M${x} ${y-25} l-9 -9 m9 9 l-1 -10`);break;
- case'avometer':a(-40,0,-27,0);a(27,0,40,0);rect(g,x-27,y-21,54,42,'symbol-fill',4);pth(g,`M${x-17} ${y+9} Q${x} ${y-17} ${x+17} ${y+9}`);ln(g,x,y+8,x+9,y-7);break;
- case'fan':a(-40,0,-25,0);a(25,0,40,0);c(0,0,24);for(let i=0;i<4;i++){let an=i*Math.PI/2;pth(g,`M${x} ${y} Q${x+Math.cos(an)*7-Math.sin(an)*12} ${y+Math.sin(an)*7+Math.cos(an)*12} ${x+Math.cos(an)*19} ${y+Math.sin(an)*19}`)}break;
- case'pot':a(-40,0,-25,0);a(25,0,40,0);pth(g,`M${x-25} ${y} l6 -11 l8 22 l8 -22 l8 11`);ln(g,x,y-31,x,y-9);pth(g,`M${x-5} ${y-16} L${x} ${y-9} L${x+5} ${y-16}`);break;
- case'ne555':rect(g,x-30,y-36,60,72,'symbol-fill',3);t(0,5,'NE555','ref-text');break;
- case'button':a(-40,0,-13,0);a(13,0,40,0);c(-13,0,3);c(13,0,3);ln(g,x-13,y,x+13,y-16);ln(g,x+13,y-16,x+13,y-25);break;
- }}
-function partValue(p){switch(p.type){case'battery':return p.voltage+' V';case'fuse':return p.rating+' A'+(p.blown?' • PUTUS':'');case'switch':return p.closed?'ON':'OFF';case'relay':return p.closed?'AKTIF':'12 V COIL';case'lamp':return p.ratedVoltage+' V / '+p.watts+' W';case'resistor':return fmtOhm(p.ohms);case'ldr':return 'Cahaya '+p.light+'%';case'pot':return fmtOhm(p.ohms)+' • '+p.position+'%';case'fan':return p.ratedVoltage+' V / '+p.watts+' W';case'ne555':return p.frequency+' Hz';case'button':return p.pressed?'PRESSED':'NO';default:return p.value||''}}
-function fmtOhm(v){return v>=1000?(v/1000).toFixed(v%1000?1:0)+' kΩ':v+' Ω'}
-function render(){wireLayer.innerHTML='';flowLayer.innerHTML='';componentLayer.innerHTML='';overlayLayer.innerHTML='';$('canvasEmpty').style.display=parts.length?'none':'flex';$('componentCount').textContent=parts.length;
- wires.forEach((w,i)=>{let a=parts.find(p=>p.id===w.a),b=parts.find(p=>p.id===w.b);if(!a||!b)return;let q=pinPos(a,w.ai),r=pinPos(b,w.bi),mx=snap((q.x+r.x)/2);let d=`M${q.x},${q.y} H${mx} V${r.y} H${r.x}`;let active=powered&&lastSolution?.energizedWires?.has(i);pth(wireLayer,d,'wire-line'+(active?' live':''));if(active){let dot=el('circle',{cx:q.x,cy:q.y,r:3.5,class:'flow-dot'},flowLayer);el('animateMotion',{dur:'1.3s',repeatCount:'indefinite',path:d},dot);let dot2=el('circle',{cx:r.x,cy:r.y,r:3,class:'flow-dot'},flowLayer);el('animateMotion',{dur:'1.3s',begin:'-.65s',repeatCount:'indefinite',path:d},dot2)}});
- parts.forEach(p=>{let g=el('g',{class:'component'+(selected===p.id?' selected':'')+(p.type==='lamp'&&p.on?' lamp-on':'')},componentLayer);let frame=el('rect',{x:p.x-58,y:p.y-59,width:116,height:118,rx:5,class:'select-frame'},g);let inner=el('g',{transform:`rotate(${p.rotation||0} ${p.x} ${p.y})`},g);drawSymbol(inner,p);txt(g,p.x,p.y-47,p.ref,'ref-text');txt(g,p.x,p.y+52,partValue(p),'value-text');if(p.on)txt(g,p.x,p.y+65,'● ENERGIZED','part-status');
- pinOffsets(p).forEach((_,i)=>{let q=pinPos(p,i);let n=el('circle',{cx:q.x,cy:q.y,r:5.5,class:'terminal'+(wireStart&&wireStart.id===p.id&&wireStart.pin===i?' pending':'')+(i===1?' negative':'')},g);n.addEventListener('click',e=>{e.stopPropagation();if(mode==='wire')connectPin(p.id,i);else if(meterActive)meterPick(p.id,i);else selectPart(p.id)});n.appendChild(document.createElementNS(NS,'title')).textContent=pinName(p,i)});g.addEventListener('click',()=>{if(mode==='select')selectPart(p.id)});g.addEventListener('pointerdown',e=>{if(e.target.classList.contains('terminal'))return;if(mode==='wire'&&e.target.closest('.component')){selectPart(p.id);return}dragPart(e,p,g)});});
- if(wireStart){let p=parts.find(x=>x.id===wireStart.id);if(p){let q=pinPos(p,wireStart.pin);pth(overlayLayer,`M${q.x},${q.y} L${q.x+30},${q.y} L${q.x+30},${q.y+30}`,'wire-line live')}}}
-function dragPart(e,p,g){if(mode!=='select')return;snapshot();let sx=e.clientX,sy=e.clientY,ox=p.x,oy=p.y,r=svg.getBoundingClientRect(),scaleX=1400/r.width,scaleY=850/r.height;g.setPointerCapture(e.pointerId);let move=ev=>{p.x=Math.max(70,Math.min(1330,snap(ox+(ev.clientX-sx)*scaleX)));p.y=Math.max(80,Math.min(800,snap(oy+(ev.clientY-sy)*scaleY)));render()};let up=()=>{g.removeEventListener('pointermove',move);g.removeEventListener('pointerup',up);};g.addEventListener('pointermove',move);g.addEventListener('pointerup',up)}
-function connectPin(id,pin){if(!wireStart){wireStart={id,pin};render();toast('Pilih terminal tujuan');return}if(wireStart.id===id&&wireStart.pin===pin){wireStart=null;render();return}if(wires.some(w=>(w.a===wireStart.id&&w.ai===wireStart.pin&&w.b===id&&w.bi===pin)||(w.b===wireStart.id&&w.bi===wireStart.pin&&w.a===id&&w.ai===pin))){toast('Kabel sudah terpasang');wireStart=null;render();return}snapshot();wires.push({a:wireStart.id,ai:wireStart.pin,b:id,bi:pin});wireStart=null;powered=false;lastSolution=null;render();toast('Kabel berhasil dipasang')}
-function selectPart(id){selected=id;render();updateInspector()}
-function updateInspector(){let box=$('inspector'),p=parts.find(x=>x.id===selected);if(!p){box.innerHTML='<div class="empty-inspector"><div>⌖</div>Pilih komponen pada lembar kerja untuk mengatur nilainya.</div>';return}
- let h=`<div class="prop-title">${p.name}</div><div class="prop-ref">${p.ref} • ID ${p.id}</div>`;
- const field=(k,label,min=0,max=100000,step=1)=>{h+=`<div class="field"><label>${label}</label><input type="number" min="${min}" max="${max}" step="${step}" data-key="${k}" value="${p[k]}"></div>`};
- const check=(k,label)=>{h+=`<div class="field"><label><input type="checkbox" data-key="${k}" ${p[k]?'checked':''}> ${label}</label></div>`};
- if(p.type==='battery')field('voltage','Tegangan nominal (V)',1,48,.1);
- if(p.type==='fuse'){field('rating','Rating fuse (A)',.1,100,.1);check('blown','Simulasikan fuse putus')}
- if(p.type==='switch')check('closed','Kontak tertutup (ON)');
- if(p.type==='relay'){field('coilVoltage','Tegangan kumparan (V)',3,48,.1);check('closed','Paksa kontak relay tertutup (mode latihan)')}
- if(p.type==='lamp'){field('ratedVoltage','Tegangan nominal (V)',1,48,.1);field('watts','Daya nominal (W)',.1,200,.1)}
- if(p.type==='resistor')field('ohms','Hambatan (Ω)',.1,10000000,.1);
- if(p.type==='ldr')field('light','Intensitas cahaya (%)',1,100,1);
- if(p.type==='pot'){field('ohms','Hambatan total (Ω)',1,1000000,1);field('position','Posisi wiper (%)',0,100,1)}
- if(p.type==='fan'){field('ratedVoltage','Tegangan nominal (V)',1,48,.1);field('watts','Daya nominal (W)',.1,100,.1)}
- if(p.type==='ne555'){field('frequency','Frekuensi output (Hz)',.1,100000,.1);field('duty','Duty cycle (%)',1,99,1);check('enabled','Aktifkan osilator')}
- if(p.type==='button')check('pressed','Tombol ditekan');
- if(p.type==='diode')h+='<div class="field"><small class="help">Model dioda silikon dengan tegangan maju sekitar 0,7 V. Polaritas terminal mengikuti simbol.</small></div>';
- if(p.type==='avometer')h+='<div class="field"><small class="help">Gunakan tab Avometer untuk menempatkan probe pada dua titik rangkaian.</small></div>';
- h+=`<div class="field"><label>Rotasi</label><select id="rotationSelect"><option value="0">0°</option><option value="90">90°</option><option value="180">180°</option><option value="270">270°</option></select></div><div class="prop-buttons"><button class="secondary" id="duplicateBtn">Duplikat</button><button class="secondary" id="deletePartBtn">Hapus</button></div>`;
- box.innerHTML=h;$('rotationSelect').value=p.rotation||0;$('rotationSelect').onchange=()=>{snapshot();p.rotation=Number($('rotationSelect').value);render()};
- box.querySelectorAll('[data-key]').forEach(inp=>inp.onchange=()=>{snapshot();p[inp.dataset.key]=inp.type==='checkbox'?inp.checked:Number(inp.value);powered=false;render();updateInspector()});
- $('deletePartBtn').onclick=()=>{snapshot();parts=parts.filter(x=>x.id!==p.id);wires=wires.filter(w=>w.a!==p.id&&w.b!==p.id);selected=null;powered=false;render();updateInspector()};
- $('duplicateBtn').onclick=()=>{snapshot();let q={...clone(p),id:nextId++,x:p.x+100,y:p.y+80,ref:p.ref+' copy'};parts.push(q);selected=q.id;render();updateInspector()};
+
+const partNames = Object.fromEntries(
+  catalog.map(c => [c.type,c.name])
+);
+
+const paletteSymbols = {
+  battery:'<path d="M-15 -12 H15 M-8 -4 H8 M-15 5 H15 M-8 13 H8" />',
+  fuse:'<rect x="-19" y="-9" width="38" height="18" rx="3"/>',
+  switch:'<path d="M-20 0 H-5 M-5 0 L15 -13 M15 0 H20"/>',
+  relay:'<rect x="-19" y="-15" width="38" height="30"/><path d="M-15 0 L15 -10"/>',
+  rotary:'<circle r="17"/><path d="M-12 0 Q0 -15 12 0 Q0 15 -12 0"/>',
+  lamp:'<circle r="17"/><path d="M-10 -10 L10 10 M10 -10 L-10 10"/>',
+  led:'<path d="M-15 -12 L10 0 L-15 12 Z M10 -12 V12 M-3 -20 L8 -28 M8 -28 L5 -21 M8 -28 L1 -28"/>',
+  diode:'<path d="M-15 -12 L10 0 L-15 12 Z M10 -13 V13"/>',
+  resistor:'<path d="M-20 0 L-15 -9 L-7 9 L1 -9 L9 9 L15 -9 L20 0"/>',
+  ldr:'<circle r="15"/><path d="M-8 -23 L-20 -35 M-20 -35 L-10 -33 M-20 -35 L-18 -25 M0 -25 L-10 -37"/>',
+  avometer:'<rect x="-18" y="-18" width="36" height="36" rx="4"/><path d="M-10 5 Q0 -13 10 5"/>',
+  fan:'<circle r="16"/><path d="M0 0 Q-15 -22 -4 -13 Q8 -5 0 0 M0 0 Q22 -15 13 -4 Q5 8 0 0 M0 0 Q15 22 4 13 Q-8 5 0 0"/>',
+  pot:'<rect x="-17" y="-10" width="34" height="20"/><path d="M0 -25 V-10 M-5 -16 L0 -10 L5 -16"/>',
+  ne555:'<rect x="-20" y="-20" width="40" height="40" rx="3"/><text x="0" y="5" text-anchor="middle" font-size="11">555</text>',
+  button:'<circle r="14"/><path d="M-8 -8 L8 8 M-8 8 L8 -8"/>'
+};
+
+/* =====================================================
+   2. BASIC HELPERS
+===================================================== */
+
+function snap(n) {
+  return Math.round(n / GRID) * GRID;
 }
-function unionFind(n){let par=Array.from({length:n},(_,i)=>i);return{find(x){while(par[x]!==x){par[x]=par[par[x]];x=par[x]}return x},join(a,b){a=this.find(a);b=this.find(b);if(a!==b)par[b]=a}}}
-function solveLinear(A,b){let n=b.length;A=A.map((r,i)=>[...r,b[i]]);for(let i=0;i<n;i++){let max=i;for(let j=i+1;j<n;j++)if(Math.abs(A[j][i])>Math.abs(A[max][i]))max=j;[A[i],A[max]]=[A[max],A[i]];if(Math.abs(A[i][i])<1e-12)throw Error('Matriks singular');let d=A[i][i];for(let k=i;k<=n;k++)A[i][k]/=d;for(let j=0;j<n;j++)if(j!==i){let f=A[j][i];for(let k=i;k<=n;k++)A[j][k]-=f*A[i][k]}}return A.map(r=>r[n])}
-function effectiveR(p){switch(p.type){case'resistor':return p.ohms;case'ldr':return 100000/Math.max(1,p.light);case'pot':return Math.max(1,p.ohms*p.position/100);case'lamp':return p.ratedVoltage*p.ratedVoltage/p.watts;case'fan':return p.ratedVoltage*p.ratedVoltage/p.watts;case'fuse':return p.blown?1e9:.03;case'switch':return p.closed?.02:1e9;case'button':return p.pressed?.02:1e9;case'relay':return p.closed?.02:1e9;default:return null}}
-function runSolver(){let pinMap=new Map(),idx=0;parts.forEach(p=>pinOffsets(p).forEach((_,i)=>pinMap.set(p.id+':'+i,idx++)));let uf=unionFind(idx);wires.forEach(w=>{let a=pinMap.get(w.a+':'+w.ai),b=pinMap.get(w.b+':'+w.bi);if(a!==undefined&&b!==undefined)uf.join(a,b)});
- let roots=[...new Set([...pinMap.values()].map(x=>uf.find(x)))],ground=roots[0],nodes=roots.filter(x=>x!==ground),nodeIndex=new Map(nodes.map((x,i)=>[x,i]));
- const node=(p,i)=>uf.find(pinMap.get(p.id+':'+i));let sources=parts.filter(p=>p.type==='battery'),resistors=[],diodes=[];
- parts.forEach(p=>{let n1=node(p,0),n2=node(p,1);if(p.type==='diode')diodes.push({p,n1,n2});else{let r=effectiveR(p);if(r!==null&&r<1e8)resistors.push({p,n1,n2,r})}});
- let activeDiodes=new Set(),solution=null;
- for(let iter=0;iter<8;iter++){let n=nodes.length+sources.length,A=Array.from({length:n},()=>Array(n).fill(0)),b=Array(n).fill(0);nodes.forEach((_,i)=>A[i][i]+=1e-9); // tiny reference leakage keeps unused floating parts numerically solvable
- const stampR=(n1,n2,r)=>{let g=1/Math.max(r,1e-9),i=nodeIndex.get(n1),j=nodeIndex.get(n2);if(i!==undefined)A[i][i]+=g;if(j!==undefined)A[j][j]+=g;if(i!==undefined&&j!==undefined){A[i][j]-=g;A[j][i]-=g}};
- const stampI=(n1,n2,I)=>{let i=nodeIndex.get(n1),j=nodeIndex.get(n2);if(i!==undefined)b[i]-=I;if(j!==undefined)b[j]+=I};
- const stampV=(n1,n2,V,k)=>{let row=nodes.length+k,i=nodeIndex.get(n1),j=nodeIndex.get(n2);if(i!==undefined){A[i][row]+=1;A[row][i]+=1}if(j!==undefined){A[j][row]-=1;A[row][j]-=1}b[row]=V};
- resistors.forEach(r=>stampR(r.n1,r.n2,r.r));diodes.forEach(d=>stampR(d.n1,d.n2,activeDiodes.has(d.p.id)?.12:1e9));sources.forEach((s,k)=>stampV(node(s,0),node(s,1),s.voltage,k));
- try{let x=solveLinear(A,b);solution={x,nodes,nodeIndex,ground,roots,pinMap,uf,sources,resistors,diodes};let changed=false;diodes.forEach(d=>{let v=voltageAt(solution,d.n1)-voltageAt(solution,d.n2),on=v>.65;if(on!==activeDiodes.has(d.p.id)){if(on)activeDiodes.add(d.p.id);else activeDiodes.delete(d.p.id);changed=true}});if(!changed)break}catch(e){return{error:'Rangkaian tidak dapat diselesaikan. Periksa sambungan, polaritas, dan kemungkinan sumber tegangan saling bertentangan.',roots,ground}}
- }
- function voltageAt(sol,n){let i=sol.nodeIndex.get(n);return i===undefined?0:sol.x[i]}
- solution.voltageAt=voltageAt;solution.partVoltage=p=>voltageAt(solution,node(p,0))-voltageAt(solution,node(p,1));solution.partCurrent=p=>{let r=effectiveR(p);if(r!==null&&r<1e8)return solution.partVoltage(p)/r;if(p.type==='diode')return activeDiodes.has(p.id)?solution.partVoltage(p)/.12:0;return 0};
- solution.activeDiodes=activeDiodes;solution.wireNodes=wires.map(w=>[node(parts.find(p=>p.id===w.a),w.ai),node(parts.find(p=>p.id===w.b),w.bi)]);
- let totalCurrent=sources.reduce((s,p,k)=>s+Math.abs(solution.x[nodes.length+k]),0),voltage=sources[0]?.voltage||0;
- let connected=roots.length<idx,energizedWires=new Set();if(totalCurrent>1e-7)wires.forEach((w,i)=>energizedWires.add(i));
- return{...solution,totalCurrent,voltage,totalPower:voltage*totalCurrent,energizedWires,connected};
+
+function clone(obj) {
+  return JSON.parse(JSON.stringify(obj));
 }
-function updateMeters(){if(!lastSolution){$('meterReading').textContent='0.000';return}if(meterMode==='R'){$('meterReading').textContent=probeRed&&probeBlack?'—':'OL';return}if(probeRed&&probeBlack){let a=lastSolution.pinMap.get(probeRed.id+':'+probeRed.pin),b=lastSolution.pinMap.get(probeBlack.id+':'+probeBlack.pin);if(a!==undefined&&b!==undefined){let va=lastSolution.voltageAt(lastSolution.uf.find(a)),vb=lastSolution.voltageAt(lastSolution.uf.find(b)),v=va-vb;$('meterReading').textContent=(meterMode==='V'?v:lastSolution.totalCurrent).toFixed(3);return}}$('meterReading').textContent=(meterMode==='V'?lastSolution.voltage:lastSolution.totalCurrent).toFixed(3)}
-function meterPick(id,pin){if(!probeRed){probeRed={id,pin};$('probeRed').textContent='Merah: '+parts.find(p=>p.id===id).ref+' / '+pinName(parts.find(p=>p.id===id),pin)}else{probeBlack={id,pin};$('probeBlack').textContent='Hitam: '+parts.find(p=>p.id===id).ref+' / '+pinName(parts.find(p=>p.id===id),pin)}updateMeters();toast('Probe avometer diperbarui')}
-function solveAndRender(show=true){powered=show;lastSolution=show?runSolver():null;if(show&&lastSolution&&!lastSolution.error){parts.forEach(p=>{p.on=false;if(['lamp','fan'].includes(p.type)){let v=Math.abs(lastSolution.partVoltage(p)),r=effectiveR(p);p.on=v>1&&r<1e8}if(p.type==='diode')p.on=lastSolution.activeDiodes.has(p.id);if(p.type==='relay')p.on=Math.abs(lastSolution.partCurrent(p))>.03;if(p.type==='ne555')p.on=p.enabled});}
- $('statusIndicator').classList.toggle('on',show&&!lastSolution?.error);$('statusText').textContent=show?(lastSolution?.error?'Analisis gagal':'Simulasi DC aktif'):'Mode desain';
- $('analysisSubtitle').textContent=show?'Analisis nodal DC • hasil perhitungan rangkaian':'Hasil simulasi akan muncul setelah Run DC';
- $('metricVoltage').innerHTML=show&&!lastSolution?.error?lastSolution.voltage.toFixed(2)+' <em>V</em>':'— <em>V</em>';$('metricCurrent').innerHTML=show&&!lastSolution?.error?lastSolution.totalCurrent.toFixed(3)+' <em>A</em>':'— <em>A</em>';$('metricPower').innerHTML=show&&!lastSolution?.error?lastSolution.totalPower.toFixed(2)+' <em>W</em>':'— <em>W</em>';
- $('metricState').textContent=!show?'Belum diuji':lastSolution?.error?'Error':lastSolution.totalCurrent<1e-6?'Tidak ada arus':'Tersimulasi';
- $('diagnostics').textContent=!show?'Tambahkan baterai dan beban, hubungkan terminal dengan kabel, lalu jalankan simulasi.':lastSolution?.error||diagnose(lastSolution);
- render();updateMeters()}
-function diagnose(sol){let fuses=parts.filter(p=>p.type==='fuse'&&!p.blown&&Math.abs(sol.partCurrent(p))>p.rating);if(fuses.length)return'Peringatan: arus melebihi rating '+fuses.map(p=>p.ref).join(', ')+'. Fuse belum otomatis putus; periksa rating dan beban.';let lamps=parts.filter(p=>p.type==='lamp'&&p.on);return lamps.length?'Rangkaian terselesaikan. '+lamps.map(p=>p.ref+' menyala').join(', ')+'. Nilai dihitung menggunakan analisis nodal DC.':'Analisis selesai. Tidak ada lampu yang menyala; periksa kontinuitas kabel, sakelar, polaritas baterai, dan beban.'}
-function setMode(m){mode=m;$('wireBtn').classList.toggle('active',m==='wire');$('selectBtn').classList.toggle('active',m==='select');svg.style.cursor=m==='wire'?'crosshair':'default';toast(m==='wire'?'Mode kabel: pilih dua terminal':'Mode pilih: seret komponen untuk memindahkan')}
-function initLibrary(){
- const root=$('componentLibrary');
- if(!root) return;
- root.replaceChildren();
- const glyph={battery:'▤',fuse:'▱',switch:'⏻',relay:'▣',lamp:'◉',diode:'▷|',resistor:'〰',ldr:'☼',avometer:'◫',fan:'✥',pot:'◩',ne555:'▥',button:'●'};
- catalog.forEach(d=>{
-   const b=document.createElement('button'); b.type='button'; b.className='lib-item';
-   b.dataset.name=(d[0]+' '+d[1]+' '+d[2]+' '+d[3]).toLocaleLowerCase('id');
-   b.innerHTML=`<span class="lib-symbol" aria-hidden="true">${glyph[d[0]]||'◇'}</span><span class="lib-label">${d[1]}</span>`;
-   b.addEventListener('click',()=>addPart(d[0])); root.appendChild(b);
- });
- filterLibrary($('searchParts')?.value||'');
+
+function getDefinition(type) {
+  return catalog.find(c => c.type === type);
 }
-function filterLibrary(value){
- const query=String(value||'').trim().toLocaleLowerCase('id');
- document.querySelectorAll('#componentLibrary .lib-item').forEach(b=>{
-   const name=(b.dataset.name||'').toLocaleLowerCase('id');
-   const visible=!query||name.includes(query)||name.replace(/[^a-z0-9]/g,'').includes(query.replace(/[^a-z0-9]/g,''));
-   b.hidden=!visible;
- });
- const visibleCount=[...document.querySelectorAll('#componentLibrary .lib-item')].filter(b=>!b.hidden).length;
- let empty=$('libraryNoResults');
- if(!empty){empty=document.createElement('div');empty.id='libraryNoResults';empty.className='library-no-results';empty.textContent='Komponen tidak ditemukan. Coba kata kunci lain.';$('componentLibrary').after(empty)}
- empty.hidden=visibleCount>0;
+
+function makeSVG(tag, attrs={}) {
+  const el = document.createElementNS(svgNS,tag);
+
+  Object.entries(attrs).forEach(([key,value]) => {
+    el.setAttribute(key,value);
+  });
+
+  return el;
 }
-$('searchParts').addEventListener('input',e=>filterLibrary(e.target.value));
-$('wireBtn').onclick=()=>setMode('wire');$('selectBtn').onclick=()=>setMode('select');$('runBtn').onclick=()=>{if(!parts.some(p=>p.type==='battery')){toast('Tambahkan baterai terlebih dahulu');return}solveAndRender(true)};$('stopBtn').onclick=()=>solveAndRender(false);
-$('newBtn').onclick=()=>{if(confirm('Mulai rangkaian baru? Semua komponen pada lembar kerja akan dihapus.')){snapshot();parts=[];wires=[];selected=null;solveAndRender(false);updateInspector()}};
-$('rotateBtn').onclick=()=>{let p=parts.find(x=>x.id===selected);if(p){snapshot();p.rotation=(p.rotation+90)%360;render();updateInspector()}else toast('Pilih komponen terlebih dahulu')};
-$('deleteBtn').onclick=()=>{let p=parts.find(x=>x.id===selected);if(!p)return;snapshot();parts=parts.filter(x=>x.id!==p.id);wires=wires.filter(w=>w.a!==p.id&&w.b!==p.id);selected=null;solveAndRender(false);updateInspector()};
-$('undoBtn').onclick=()=>{if(!undoStack.length)return;redoStack.push(JSON.stringify({parts,wires,nextId}));restore(undoStack.pop())};$('redoBtn').onclick=()=>{if(!redoStack.length)return;undoStack.push(JSON.stringify({parts,wires,nextId}));restore(redoStack.pop())};
-$('zoomIn').onclick=()=>{zoom=Math.min(1.7,zoom+.1);svg.style.transform=`scale(${zoom})`};$('zoomOut').onclick=()=>{zoom=Math.max(.6,zoom-.1);svg.style.transform=`scale(${zoom})`};$('zoomFit').onclick=()=>{zoom=1;svg.style.transform='scale(1)'};
-$('saveBtn').onclick=()=>{let blob=new Blob([JSON.stringify({app:'Electrical Basic Simulator',version:3,parts,wires},null,2)],{type:'application/json'}),a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download='rangkaian-smk-maharati.json';a.click();URL.revokeObjectURL(a.href);toast('File rangkaian disimpan')};
-$('loadBtn').onclick=()=>$('fileInput').click();$('fileInput').onchange=e=>{let f=e.target.files[0];if(!f)return;let r=new FileReader();r.onload=()=>{try{let d=JSON.parse(r.result);if(!Array.isArray(d.parts)||!Array.isArray(d.wires))throw Error();snapshot();parts=d.parts;wires=d.wires;nextId=Math.max(0,...parts.map(p=>p.id))+1;solveAndRender(false);updateInspector();toast('Rangkaian berhasil dibuka')}catch(err){toast('File rangkaian tidak valid')}};r.readAsText(f)};
-$('exportBtn').onclick=()=>{let cloneSvg=svg.cloneNode(true);cloneSvg.setAttribute('xmlns',NS);let data=new XMLSerializer().serializeToString(cloneSvg),url=URL.createObjectURL(new Blob([data],{type:'image/svg+xml'})),img=new Image();img.onload=()=>{let c=document.createElement('canvas');c.width=1400;c.height=850;c.getContext('2d').drawImage(img,0,0);c.toBlob(blob=>{let a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download='skematik-smk-maharati.png';a.click()});URL.revokeObjectURL(url)};img.src=url};
-document.querySelectorAll('.right-tab').forEach(b=>b.onclick=()=>{document.querySelectorAll('.right-tab').forEach(x=>x.classList.toggle('active',x===b));meterActive=b.dataset.right==='meter';$('propertiesPane').classList.toggle('hidden',b.dataset.right!=='properties');$('meterPane').classList.toggle('hidden',b.dataset.right!=='meter')});
-document.querySelectorAll('.meter-mode').forEach(b=>b.onclick=()=>{meterMode=b.dataset.mode;document.querySelectorAll('.meter-mode').forEach(x=>x.classList.toggle('active',x===b));$('meterModeLabel').textContent=meterMode==='V'?'DC VOLTAGE':meterMode==='A'?'DC CURRENT':'RESISTANCE';$('meterUnit').textContent=meterMode==='R'?'Ω':meterMode;updateMeters()});
-$('clearProbes').onclick=()=>{probeRed=probeBlack=null;$('probeRed').textContent='Merah: belum dipilih';$('probeBlack').textContent='Hitam: belum dipilih';updateMeters()};
-svg.addEventListener('mousemove',e=>{let r=svg.getBoundingClientRect(),x=Math.round((e.clientX-r.left)/r.width*W),y=Math.round((e.clientY-r.top)/r.height*H);$('coords').textContent=`X: ${x} • Y: ${y}`});
-document.querySelectorAll('.menuitem').forEach(b=>b.onclick=()=>{document.querySelectorAll('.menuitem').forEach(x=>x.classList.toggle('active',x===b));if(b.dataset.tab==='learn')showGuide();else toast('Kembali ke lembar Schematic')});
-function showGuide(){toast('Panduan: tambahkan baterai, switch, dan lampu; hubungkan terminal membentuk loop tertutup, ON-kan switch, lalu RUN DC.')}
-initLibrary();render();updateInspector();
+
+function addSVG(parent,tag,attrs={}) {
+  const el = makeSVG(tag,attrs);
+  parent.appendChild(el);
+  return el;
+}
+
+function toast(message) {
+  const t = $('toast');
+  t.textContent = message;
+  t.classList.add('show');
+
+  clearTimeout(toast.timer);
+  toast.timer = setTimeout(() => {
+    t.classList.remove('show');
+  },2200);
+}
+
+function getPart(id) {
+  return parts.find(p => p.id === id);
+}
+
+function getSelected() {
+  return getPart(selected);
+}
+
+/* =====================================================
+   3. LIBRARY DRAG AND DROP
+===================================================== */
+
+function initLibrary() {
+  const root = $('componentLibrary');
+  root.innerHTML = '';
+
+  catalog.forEach(def => {
+    const card = document.createElement('div');
+    card.className = 'lib-item';
+    card.dataset.type = def.type;
+
+    const symbol = document.createElement('div');
+    symbol.className = 'lib-symbol';
+
+    symbol.innerHTML = `
+      <svg viewBox="-35 -40 70 80"
+           xmlns="http://www.w3.org/2000/svg"
+           fill="none"
+           stroke="#173957"
+           stroke-width="2.5"
+           stroke-linecap="round"
+           stroke-linejoin="round">
+        ${paletteSymbols[def.type]}
+      </svg>`;
+
+    const label = document.createElement('div');
+    label.className = 'lib-label';
+    label.textContent = def.name;
+
+    const hint = document.createElement('small');
+    hint.className = 'lib-hint';
+    hint.textContent = 'SERET KE AREA KERJA';
+
+    card.append(symbol,label,hint);
+
+    card.addEventListener('pointerdown', e => {
+      if (e.button !== 0) return;
+      e.preventDefault();
+
+      const ghost = card.cloneNode(true);
+      ghost.style.position = 'fixed';
+      ghost.style.width = card.offsetWidth + 'px';
+      ghost.style.height = card.offsetHeight + 'px';
+      ghost.style.zIndex = '99999';
+      ghost.style.pointerEvents = 'none';
+      ghost.style.opacity = '.9';
+      ghost.style.left = e.clientX + 'px';
+      ghost.style.top = e.clientY + 'px';
+      ghost.style.transform = 'translate(-50%,-50%)';
+
+      document.body.appendChild(ghost);
+
+      $('canvasShell').classList.add('drop-ready');
+
+      const move = ev => {
+        ghost.style.left = ev.clientX + 'px';
+        ghost.style.top = ev.clientY + 'px';
+      };
+
+      const end = ev => {
+        document.removeEventListener('pointermove',move);
+        document.removeEventListener('pointerup',end);
+        document.removeEventListener('pointercancel',cancel);
+
+        ghost.remove();
+        $('canvasShell').classList.remove('drop-ready');
+
+        const rect = svg.getBoundingClientRect();
+
+        if (
+          ev.clientX >= rect.left &&
+          ev.clientX <= rect.right &&
+          ev.clientY >= rect.top &&
+          ev.clientY <= rect.bottom
+        ) {
+          const x = (ev.clientX - rect.left) / rect.width * W;
+          const y = (ev.clientY - rect.top) / rect.height * H;
+
+          addPart(def.type,x,y);
+        }
+      };
+
+      const cancel = () => {
+        document.removeEventListener('pointermove',move);
+        document.removeEventListener('pointerup',end);
+        ghost.remove();
+        $('canvasShell').classList.remove('drop-ready');
+      };
+
+      document.addEventListener('pointermove',move);
+      document.addEventListener('pointerup',end);
+      document.addEventListener('pointercancel',cancel);
+    });
+
+    root.appendChild(card);
+  });
+
+  $('partCount').textContent = catalog.length;
+}
+
+/* =====================================================
+   4. ADD COMPONENT
+===================================================== */
+
+function addPart(type,x=300,y=200) {
+  const def = getDefinition(type);
+  if (!def) return;
+
+  const index = parts.filter(p => p.type === type).length + 1;
+
+  const p = {
+    id:nextId++,
+    type,
+    name:def.name,
+    ref:def.ref + index,
+    x:snap(x),
+    y:snap(y),
+    rotation:0,
+    ...clone(def.defaults)
+  };
+
+  parts.push(p);
+  selected = p.id;
+
+  render();
+  updateInspector();
+
+  toast(def.name + ' ditambahkan');
+}
+
+/* =====================================================
+   5. COMPONENT SYMBOL DRAWING
+===================================================== */
+
+function drawPart(group,p) {
+  const line = (x1,y1,x2,y2) => addSVG(group,'line',{
+    x1,y1,x2,y2,class:'part-shape'
+  });
+
+  const rect = (x,y,w,h,rx=0) => addSVG(group,'rect',{
+    x,y,width:w,height:h,rx,class:'part-shape'
+  });
+
+  const circle = (cx,cy,r) => addSVG(group,'circle',{
+    cx,cy,r,class:'part-shape'
+  });
+
+  const path = d => addSVG(group,'path',{
+    d,class:'part-shape'
+  });
+
+  switch(p.type) {
+
+    case 'battery':
+      line(-50,0,-12,0);
+      line(12,0,50,0);
+      line(-12,-19,-12,19);
+      line(12,-10,12,10);
+      addSVG(group,'text',{x:-17,y:-25,'font-size':12}).textContent='+';
+      addSVG(group,'text',{x:7,y:29,'font-size':12}).textContent='−';
+      break;
+
+    case 'fuse':
+      line(-40,0,-19,0);
+      line(19,0,40,0);
+      rect(-19,-11,38,22,3);
+      line(-12,0,12,0);
+      break;
+
+    case 'switch':
+      line(-40,0,-7,0);
+      line(7,0,40,0);
+      circle(-7,0,3);
+      circle(7,0,3);
+
+      if(p.closed) {
+        line(-7,0,7,0);
+      } else {
+        line(-7,0,12,-20);
+      }
+      break;
+
+    case 'relay':
+      rect(-30,-22,60,44,3);
+      path('M-18 -7 L18 -16');
+      line(-55,-25,-30,-25);
+      line(-55,25,-30,25);
+      line(30,0,55,0);
+      addSVG(group,'text',{
+        x:0,y:5,'text-anchor':'middle','font-size':10
+      }).textContent='COIL';
+      break;
+
+    case 'rotary':
+    case 'lamp':
+      line(-45,0,-18,0);
+      line(18,0,45,0);
+      circle(0,0,18);
+      path('M-11 -11 L11 11 M11 -11 L-11 11');
+      break;
+
+    case 'led':
+      line(-45,0,-15,0);
+      line(12,0,45,0);
+      path('M-15 -14 L12 0 L-15 14 Z');
+      line(12,-14,12,14);
+      path('M-2 -22 L8 -32 M8 -32 L3 -31 M8 -32 L6 -26');
+      path('M7 -17 L17 -27 M17 -27 L12 -26 M17 -27 L15 -21');
+      break;
+
+    case 'diode':
+      line(-45,0,-15,0);
+      line(12,0,45,0);
+      path('M-15 -15 L12 0 L-15 15 Z');
+      line(12,-16,12,16);
+      break;
+
+    case 'resistor':
+      line(-45,0,-25,0);
+      line(25,0,45,0);
+      path('M-25 0 L-18 -12 L-7 12 L4 -12 L15 12 L25 0');
+      break;
+
+    case 'ldr':
+      line(-45,0,-18,0);
+      line(18,0,45,0);
+      circle(0,0,18);
+      path('M-11 -11 L11 11 M11 -11 L-11 11');
+      path('M-14 -27 L-25 -39 M-25 -39 L-15 -37 M-25 -39 L-23 -29');
+      path('M1 -29 L-9 -41 M-9 -41 L1 -39 M-9 -41 L-7 -31');
+      break;
+
+    case 'avometer':
+      line(-45,0,-20,0);
+      line(20,0,45,0);
+      rect(-20,-24,40,48,4);
+      path('M-12 9 Q0 -17 12 9');
+      line(0,0,8,-11);
+      addSVG(group,'text',{
+        x:0,y:20,'text-anchor':'middle','font-size':9
+      }).textContent='V/A';
+      break;
+
+    case 'fan':
+      line(-45,0,-18,0);
+      line(18,0,45,0);
+      circle(0,0,18);
+      path('M0 0 Q-15 -25 -4 -13 Q7 -7 0 0');
+      path('M0 0 Q25 -15 13 -4 Q7 7 0 0');
+      path('M0 0 Q15 25 4 13 Q-7 7 0 0');
+      circle(0,0,3);
+      break;
+
+    case 'pot':
+      line(-50,0,-20,0);
+      line(20,0,50,0);
+      line(0,-45,0,-13);
+      rect(-20,-13,40,26);
+      path('M-5 -30 L0 -20 L5 -30');
+      break;
+
+    case 'ne555':
+      rect(-38,-48,76,96,4);
+
+      for(let i=0;i<4;i++) {
+        line(-55,-35+i*23,-38,-35+i*23);
+        line(38,-35+i*23,55,-35+i*23);
+      }
+
+      addSVG(group,'text',{
+        x:0,y:-5,'text-anchor':'middle',
+        'font-size':17,'font-weight':'bold'
+      }).textContent='NE555';
+
+      addSVG(group,'text',{
+        x:0,y:13,'text-anchor':'middle',
+        'font-size':10
+      }).textContent='TIMER';
+      break;
+
+    case 'button':
+      line(-40,0,-9,0);
+      line(9,0,40,0);
+      circle(0,0,10);
+      line(0,-10,0,-25);
+      if(p.pressed) line(-9,0,9,0);
+      break;
+  }
+
+  // Component reference and value
+  addSVG(group,'text',{
+    x:0,y:48,
+    class:'part-label',
+    'text-anchor':'middle'
+  }).textContent=p.ref;
+
+  addSVG(group,'text',{
+    x:0,y:65,
+    class:'part-value',
+    'text-anchor':'middle'
+  }).textContent=getPartValue(p);
+
+  if(p.type === 'ne555') {
+    const labels = ['GND','TRIG','OUT','RESET',
+                    'VCC','DISCH','THR','CTRL'];
+
+    labels.forEach((label,i) => {
+      const left = i < 4;
+      const n = i % 4;
+
+      addSVG(group,'text',{
+        x:left?-58:58,
+        y:-31+n*23,
+        'text-anchor':left?'end':'start',
+        'font-size':8
+      }).textContent=label;
+    });
+  }
+}
+
+function getPartValue(p) {
+  if(p.type === 'battery') return p.voltage+' V';
+  if(p.type === 'resistor') return p.resistance+' Ω';
+  if(p.type === 'fuse') return p.rating+' A';
+  if(p.type === 'lamp' || p.type === 'rotary') return p.voltage+' V';
+  if(p.type === 'led') return p.color+' LED';
+  if(p.type === 'ldr') return p.resistance+' Ω';
+  if(p.type === 'fan') return p.voltage+' V';
+  if(p.type === 'pot') return p.resistance+' Ω';
+  if(p.type === 'ne555') return p.frequency+' Hz';
+  if(p.type === 'switch') return p.closed?'CLOSED':'OPEN';
+  if(p.type === 'button') return p.pressed?'PRESSED':'OPEN';
+  return '';
+}
+
+/* =====================================================
+   6. COMPONENT TERMINALS
+===================================================== */
+
+function terminalPosition(p,index) {
+  const def = getDefinition(p.type);
+  const t = def.terminals[index];
+
+  const angle = p.rotation * Math.PI / 180;
+
+  const x = t[0] * Math.cos(angle) - t[1] * Math.sin(angle);
+  const y = t[0] * Math.sin(angle) + t[1] * Math.cos(angle);
+
+  return {x:p.x+x,y:p.y+y};
+}
+
+/* =====================================================
+   7. RENDER COMPONENTS
+===================================================== */
+
+function render() {
+  componentLayer.innerHTML = '';
+  terminalLayer.innerHTML = '';
+  wireLayer.innerHTML = '';
+
+  wires.forEach((w,index) => drawWire(w,index));
+
+  parts.forEach(p => {
+    const g = addSVG(componentLayer,'g',{
+      class:'component-group'+(p.id===selected?' selected':''),
+      transform:`translate(${p.x} ${p.y}) rotate(${p.rotation})`,
+      'data-id':p.id
+    });
+
+    addSVG(g,'rect',{
+      x:-65,y:-55,width:130,height:130,rx:5,
+      class:'selection-outline'
+    });
+
+    drawPart(g,p);
+
+    const def = getDefinition(p.type);
+
+    def.terminals.forEach((t,index) => {
+      const pos = terminalPosition(p,index);
+
+      const terminal = addSVG(terminalLayer,'circle',{
+        cx:pos.x,cy:pos.y,r:6,
+        class:'terminal',
+        'data-part':p.id,
+        'data-terminal':index
+      });
+
+      if(pendingTerminal &&
+         pendingTerminal.part===p.id &&
+         pendingTerminal.terminal===index) {
+        terminal.classList.add('pending');
+      }
+    });
+
+    g.addEventListener('pointerdown',e => {
+      if(e.button!==0) return;
+
+      e.stopPropagation();
+
+      if(e.target.classList.contains('terminal')) return;
+
+      selected = p.id;
+      updateInspector();
+      render();
+
+      const startX = e.clientX;
+      const startY = e.clientY;
+      const originalX = p.x;
+      const originalY = p.y;
+      let moved = false;
+
+      const move = ev => {
+        const dx = (ev.clientX-startX) / svg.getBoundingClientRect().width * W;
+        const dy = (ev.clientY-startY) / svg.getBoundingClientRect().height * H;
+
+        if(Math.abs(dx)+Math.abs(dy)>3) moved=true;
+
+        if(moved) {
+          p.x = snap(originalX+dx);
+          p.y = snap(originalY+dy);
+          render();
+        }
+      };
+
+      const up = () => {
+        document.removeEventListener('pointermove',move);
+        document.removeEventListener('pointerup',up);
+
+        if(moved) {
+          updateInspector();
+        }
+      };
+
+      document.addEventListener('pointermove',move);
+      document.addEventListener('pointerup',up);
+    });
+  });
+
+  $('componentCount').textContent = parts.length;
+  $('wireStatus').textContent = 'Wire: '+wires.length;
+  $('selectionStatus').textContent = selected
+    ? (getSelected()?.ref || 'Komponen')
+    : 'Tidak ada komponen dipilih';
+}
+
+/* =====================================================
+   8. WIRING SYSTEM
+===================================================== */
+
+terminalLayer.addEventListener('click',e => {
+  const target = e.target.closest('.terminal');
+  if(!target) return;
+
+  const part = Number(target.dataset.part);
+  const terminal = Number(target.dataset.terminal);
+
+  if(!pendingTerminal) {
+    pendingTerminal = {part,terminal};
+    render();
+    toast('Pilih terminal tujuan');
+    return;
+  }
+
+  if(
+    pendingTerminal.part===part &&
+    pendingTerminal.terminal===terminal
+  ) {
+    pendingTerminal=null;
+    render();
+    return;
+  }
+
+  const duplicate = wires.some(w =>
+    (w.a.part===pendingTerminal.part &&
+     w.a.terminal===pendingTerminal.terminal &&
+     w.b.part===part && w.b.terminal===terminal) ||
+    (w.b.part===pendingTerminal.part &&
+     w.b.terminal===pendingTerminal.terminal &&
+     w.a.part===part && w.a.terminal===terminal)
+  );
+
+  if(!duplicate) {
+    wires.push({
+      id:Date.now()+Math.random(),
+      a:{...pendingTerminal},
+      b:{part,terminal}
+    });
+    toast('Kabel berhasil disambungkan');
+  }
+
+  pendingTerminal=null;
+  render();
+});
+
+function drawWire(w,index) {
+  const a = getPart(w.a.part);
+  const b = getPart(w.b.part);
+
+  if(!a || !b) return;
+
+  const p1 = terminalPosition(a,w.a.terminal);
+  const p2 = terminalPosition(b,w.b.terminal);
+
+  const midX = snap((p1.x+p2.x)/2);
+
+  const d = `M ${p1.x} ${p1.y}
+             L ${midX} ${p1.y}
+             L ${midX} ${p2.y}
+             L ${p2.x} ${p2.y}`;
+
+  const path = addSVG(wireLayer,'path',{
+    d,
+    class:'wire-path'+(running?' powered':''),
+    'data-wire':index
+  });
+
+  path.addEventListener('click',e => {
+    e.stopPropagation();
+    if(confirm('Hapus kabel ini?')) {
+      wires.splice(index,1);
+      render();
+    }
+  });
+}
+
+/* =====================================================
+   9. SIMULATION CONTROL
+===================================================== */
+
+function runSimulation() {
+  if(running) return;
+
+  running=true;
+
+  $('simulationStatus').textContent='SIMULASI BERJALAN';
+  $('simulationStatus').classList.add('running');
+  $('runBtn').classList.add('active');
+
+  const battery = parts.find(p=>p.type==='battery');
+
+  $('voltageStatus').textContent =
+    'DC: '+(battery ? battery.voltage : 0)+' V';
+
+  render();
+  updateMeter();
+
+  toast('Simulasi dijalankan');
+}
+
+function stopSimulation() {
+  running=false;
+
+  $('simulationStatus').textContent='SIMULASI BERHENTI';
+  $('simulationStatus').classList.remove('running');
+  $('runBtn').classList.remove('active');
+
+  render();
+  updateMeter();
+
+  toast('Simulasi dihentikan');
+}
+
+/* =====================================================
+   10. INSPECTOR / PROPERTIES
+===================================================== */
+
+function updateInspector() {
+  const p = getSelected();
+  const root = $('inspectorContent');
+
+  if(!p) {
+    root.innerHTML=`
+      <div class="empty-inspector">
+        <div>⚙</div>
+        Pilih komponen untuk mengatur nilainya.
+      </div>`;
+    return;
+  }
+
+  const fields = {
+    battery:[
+      ['voltage','Tegangan (V)','number']
+    ],
+    fuse:[
+      ['rating','Rating Fuse (A)','number'],
+      ['blown','Fuse putus','checkbox']
+    ],
+    switch:[
+      ['closed','Kontak tertutup','checkbox']
+    ],
+    relay:[
+      ['voltage','Tegangan coil (V)','number'],
+      ['closed','Kontak tertutup','checkbox']
+    ],
+    rotary:[
+      ['voltage','Tegangan (V)','number'],
+      ['resistance','Hambatan (Ω)','number']
+    ],
+    lamp:[
+      ['voltage','Tegangan (V)','number'],
+      ['resistance','Hambatan (Ω)','number']
+    ],
+    led:[
+      ['color','Warna LED','select'],
+      ['voltage','Tegangan maju (V)','number'],
+      ['resistance','Resistor seri (Ω)','number']
+    ],
+    diode:[
+      ['forwardVoltage','Tegangan maju (V)','number']
+    ],
+    resistor:[
+      ['resistance','Hambatan (Ω)','number']
+    ],
+    ldr:[
+      ['resistance','Hambatan gelap (Ω)','number'],
+      ['light','Intensitas cahaya (%)','range']
+    ],
+    avometer:[
+      ['mode','Mode pengukuran','select']
+    ],
+    fan:[
+      ['voltage','Tegangan (V)','number'],
+      ['resistance','Hambatan (Ω)','number']
+    ],
+    pot:[
+      ['resistance','Hambatan total (Ω)','number'],
+      ['position','Posisi (%)','range']
+    ],
+    ne555:[
+      ['voltage','Supply (V)','number'],
+      ['frequency','Frekuensi (Hz)','number'],
+      ['duty','Duty Cycle (%)','range']
+    ],
+    button:[
+      ['pressed','Tombol ditekan','checkbox']
+    ]
+  };
+
+  let html=`
+    <div class="property-form">
+      <div>
+        <strong>${p.name}</strong>
+        <div style="font-size:11px;color:#8495a6">${p.ref}</div>
+      </div>`;
+
+  (fields[p.type]||[]).forEach(([key,label,type])=>{
+    const value=p[key];
+
+    html+=`<label>${label}`;
+
+    if(type==='checkbox') {
+      html+=`
+        <input type="checkbox" data-prop="${key}"
+          ${value?'checked':''}>`;
+    } else if(type==='select') {
+      const opts = key==='color'
+        ? ['red','green','yellow','blue','white']
+        : ['V','A','R'];
+
+      html+=`<select data-prop="${key}">`;
+
+      opts.forEach(o=>{
+        html+=`<option value="${o}" ${o===value?'selected':''}>${o}</option>`;
+      });
+
+      html+='</select>';
+    } else {
+      html+=`
+        <input type="${type}" data-prop="${key}"
+          value="${value}"
+          ${type==='range'?'min="0" max="100"':''}
+          ${type==='number'?'min="0" step="any"':''}>`;
+    }
+
+    html+='</label>';
+  });
+
+  html+=`
+    <label>Referensi
+      <input value="${p.ref}" id="refInput">
+    </label>
+    <button id="applyProperties">TERAPKAN</button>
+    <button id="deleteSelected" class="danger">HAPUS KOMPONEN</button>
+  </div>`;
+
+  root.innerHTML=html;
+
+  $('applyProperties').onclick=()=>{
+    root.querySelectorAll('[data-prop]').forEach(input=>{
+      const key=input.dataset.prop;
+
+      p[key]=input.type==='checkbox'
+        ? input.checked
+        : input.type==='number'||input.type==='range'
+          ? Number(input.value)
+          : input.value;
+    });
+
+    p.ref=$('refInput').value.trim()||p.ref;
+
+    stopSimulation();
+    render();
+    updateInspector();
+    toast('Properties diperbarui');
+  };
+
+  $('deleteSelected').onclick=deleteSelected;
+}
+
+/* =====================================================
+   11. DELETE COMPONENT
+===================================================== */
+
+function deleteSelected() {
+  if(!selected) return;
+
+  parts=parts.filter(p=>p.id!==selected);
+  wires=wires.filter(w=>
+    w.a.part!==selected && w.b.part!==selected
+  );
+
+  selected=null;
+  pendingTerminal=null;
+
+  render();
+  updateInspector();
+
+  toast('Komponen dihapus');
+}
+
+/* =====================================================
+   12. ROTATION
+===================================================== */
+
+function rotateSelected() {
+  const p=getSelected();
+  if(!p) return;
+
+  p.rotation=(p.rotation+90)%360;
+
+  render();
+  updateInspector();
+}
+
+/* =====================================================
+   13. METER
+===================================================== */
+
+function updateMeter() {
+  const battery=parts.find(p=>p.type==='battery');
+
+  let value=0;
+  let unit='V DC';
+  let info='Belum ada pengukuran.';
+
+  if(meterMode==='V') {
+    value=running && battery ? battery.voltage : 0;
+    unit='V DC';
+    info=running
+      ? 'Tegangan sumber baterai.'
+      : 'Jalankan simulasi untuk membaca tegangan.';
+  }
+
+  if(meterMode==='A') {
+    value=0;
+    unit='A DC';
+    info='Pengukuran arus membutuhkan rangkaian tertutup dan analisis jalur.';
+  }
+
+  if(meterMode==='R') {
+    value=0;
+    unit='Ω';
+    info='Pilih titik ukur untuk pengukuran resistansi.';
+  }
+
+  $('meterValue').textContent=Number(value).toFixed(2);
+  $('meterUnit').textContent=unit;
+  $('meterInfo').textContent=info;
+}
+
+document.querySelectorAll('[data-meter]').forEach(btn=>{
+  btn.addEventListener('click',()=>{
+    meterMode=btn.dataset.meter;
+
+    document.querySelectorAll('[data-meter]').forEach(b=>
+      b.classList.toggle('active',b===btn)
+    );
+
+    updateMeter();
+  });
+});
+
+/* =====================================================
+   14. TOOLBAR EVENTS
+===================================================== */
+
+$('runBtn').onclick=runSimulation;
+$('stopBtn').onclick=stopSimulation;
+$('deleteBtn').onclick=deleteSelected;
+$('rotateBtn').onclick=rotateSelected;
+
+$('wireBtn').onclick=()=>{
+  pendingTerminal=null;
+  toast('Klik terminal pertama, lalu terminal kedua');
+};
+
+$('clearBtn').onclick=()=>{
+  if(!confirm('Hapus semua komponen dan kabel?')) return;
+
+  parts=[];
+  wires=[];
+  selected=null;
+  pendingTerminal=null;
+
+  stopSimulation();
+  render();
+  updateInspector();
+
+  toast('Lembar kerja dibersihkan');
+};
+
+/* =====================================================
+   15. ZOOM
+===================================================== */
+
+function applyZoom() {
+  svg.style.width=(100*zoom)+'%';
+  $('zoomValue').textContent=Math.round(zoom*100)+'%';
+}
+
+$('zoomIn').onclick=()=>{
+  zoom=Math.min(zoom+.1,2);
+  applyZoom();
+};
+
+$('zoomOut').onclick=()=>{
+  zoom=Math.max(zoom-.1,.5);
+  applyZoom();
+};
+
+$('zoomReset').onclick=()=>{
+  zoom=1;
+  applyZoom();
+};
+
+/* =====================================================
+   16. SAVE AND OPEN
+===================================================== */
+
+$('saveBtn').onclick=()=>{
+  const data={
+    version:1,
+    parts,
+    wires,
+    nextId
+  };
+
+  const blob=new Blob(
+    [JSON.stringify(data,null,2)],
+    {type:'application/json'}
+  );
+
+  const url=URL.createObjectURL(blob);
+  const a=document.createElement('a');
+
+  a.href=url;
+  a.download='Maharati-Electrical-Circuit.json';
+  a.click();
+
+  URL.revokeObjectURL(url);
+
+  toast('Rangkaian disimpan');
+};
+
+$('openBtn').onclick=()=>{
+  $('fileInput').click();
+};
+
+$('fileInput').onchange=e=>{
+  const file=e.target.files[0];
+  if(!file) return;
+
+  const reader=new FileReader();
+
+  reader.onload=()=>{
+    try {
+      const data=JSON.parse(reader.result);
+
+      if(!Array.isArray(data.parts)||!Array.isArray(data.wires)) {
+        throw new Error('Format file tidak sesuai');
+      }
+
+      parts=data.parts;
+      wires=data.wires;
+      nextId=data.nextId||1;
+
+      selected=null;
+      pendingTerminal=null;
+
+      stopSimulation();
+      render();
+      updateInspector();
+
+      toast('Rangkaian berhasil dibuka');
+    } catch(err) {
+      alert('File rangkaian tidak valid.');
+    }
+  };
+
+  reader.readAsText(file);
+  e.target.value='';
+};
+
+/* =====================================================
+   17. EXPORT SVG
+===================================================== */
+
+$('exportBtn').onclick=()=>{
+  const copy=svg.cloneNode(true);
+
+  copy.setAttribute('xmlns',svgNS);
+  copy.setAttribute('width',W);
+  copy.setAttribute('height',H);
+
+  copy.querySelectorAll('.selection-outline').forEach(e=>e.remove());
+
+  const blob=new Blob(
+    [new XMLSerializer().serializeToString(copy)],
+    {type:'image/svg+xml'}
+  );
+
+  const url=URL.createObjectURL(blob);
+  const a=document.createElement('a');
+
+  a.href=url;
+  a.download='SMK-Maharati-Schematic.svg';
+  a.click();
+
+  URL.revokeObjectURL(url);
+
+  toast('Skematik diekspor');
+};
+
+/* =====================================================
+   18. CANVAS EVENTS
+===================================================== */
+
+svg.addEventListener('click',e=>{
+  if(e.target===svg || e.target.tagName==='rect' &&
+     e.target.parentNode===svg) {
+    selected=null;
+    pendingTerminal=null;
+    render();
+    updateInspector();
+  }
+});
+
+/* =====================================================
+   19. INITIALIZATION
+===================================================== */
+
+function initialize() {
+  initLibrary();
+  render();
+  updateInspector();
+  updateMeter();
+
+  document.querySelector('[data-meter="V"]')
+    .classList.add('active');
+
+  $('simulationStatus').textContent='SIMULASI BERHENTI';
+
+  console.log('Electrical Basic Simulator - SMK Maharati Ready');
+}
+
+initialize();
