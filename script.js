@@ -626,7 +626,7 @@ function render() {
     });
   });
 
-  $('componentCount').textContent = parts.length;
+  $('partCount').textContent = catalog.length;
   $('wireStatus').textContent = 'Wire: '+wires.length;
   $('selectionStatus').textContent = selected
     ? (getSelected()?.ref || 'Komponen')
